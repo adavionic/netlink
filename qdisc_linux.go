@@ -336,6 +336,150 @@ func qdiscPayload(req *nl.NetlinkRequest, qdisc Qdisc) error {
 	return nil
 }
 
+// QdiscDeserialize deserializes a raw message received from netlink into
+// a qdisc object.
+func QdiscDeserialize(hdr *unix.NlMsghdr, m []byte) (Qdisc, error) {
+	msg := nl.DeserializeTcMsg(m)
+
+	attrs, err := nl.ParseRouteAttr(m[msg.Len():])
+	if err != nil {
+		return nil, err
+	}
+
+	base := QdiscAttrs{
+		LinkIndex: int(msg.Ifindex),
+		Handle:    msg.Handle,
+		Parent:    msg.Parent,
+		Refcnt:    msg.Info,
+	}
+
+	var (
+		qdisc     Qdisc
+		qdiscType string
+	)
+
+	for _, attr := range attrs {
+		switch attr.Attr.Type {
+		case nl.TCA_KIND:
+			qdiscType = string(attr.Value[:len(attr.Value)-1])
+			switch qdiscType {
+			case "pfifo_fast":
+				qdisc = &PfifoFast{}
+			case "prio":
+				qdisc = &Prio{}
+			case "tbf":
+				qdisc = &Tbf{}
+			case "ingress":
+				qdisc = &Ingress{}
+			case "htb":
+				qdisc = &Htb{}
+			case "fq":
+				qdisc = &Fq{}
+			case "hfsc":
+				qdisc = &Hfsc{}
+			case "fq_codel":
+				qdisc = &FqCodel{}
+			case "netem":
+				qdisc = &Netem{}
+			case "sfq":
+				qdisc = &Sfq{}
+			case "clsact":
+				qdisc = &Clsact{}
+			default:
+				qdisc = &GenericQdisc{QdiscType: qdiscType}
+			}
+
+		case nl.TCA_OPTIONS:
+			// Parse per-kind options. We rely on TCA_KIND appearing first,
+			// as in QdiscList.
+			switch qdiscType {
+			case "pfifo_fast":
+				// pfifo returns TcPrioMap directly, not wrapped in rtattr
+				if err := parsePfifoFastData(qdisc, attr.Value); err != nil {
+					return nil, err
+				}
+			case "prio":
+				// prio returns TcPrioMap directly, not wrapped in rtattr
+				if err := parsePrioData(qdisc, attr.Value); err != nil {
+					return nil, err
+				}
+			case "tbf":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if err := parseTbfData(qdisc, data); err != nil {
+					return nil, err
+				}
+			case "hfsc":
+				if err := parseHfscData(qdisc, attr.Value); err != nil {
+					return nil, err
+				}
+			case "htb":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if err := parseHtbData(qdisc, data); err != nil {
+					return nil, err
+				}
+			case "fq":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if err := parseFqData(qdisc, data); err != nil {
+					return nil, err
+				}
+			case "fq_codel":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if err := parseFqCodelData(qdisc, data); err != nil {
+					return nil, err
+				}
+			case "netem":
+				if err := parseNetemData(qdisc, attr.Value); err != nil {
+					return nil, err
+				}
+			case "sfq":
+				if err := parseSfqData(qdisc, attr.Value); err != nil {
+					return nil, err
+				}
+				// no options for ingress
+			}
+
+		case nl.TCA_INGRESS_BLOCK:
+			ingressBlock := new(uint32)
+			*ingressBlock = native.Uint32(attr.Value)
+			base.IngressBlock = ingressBlock
+
+		case nl.TCA_STATS:
+			s, err := parseTcStats(attr.Value)
+			if err != nil {
+				return nil, err
+			}
+			base.Statistics = (*QdiscStatistics)(s)
+
+		case nl.TCA_STATS2:
+			s, err := parseTcStats2(attr.Value)
+			if err != nil {
+				return nil, err
+			}
+			base.Statistics = (*QdiscStatistics)(s)
+		}
+	}
+
+	// If kind never arrived, fall back to a generic qdisc.
+	if qdisc == nil {
+		qdisc = &GenericQdisc{QdiscType: qdiscType}
+	}
+
+	*qdisc.Attrs() = base
+	return qdisc, nil
+}
+
 // QdiscList gets a list of qdiscs in the system.
 // Equivalent to: `tc qdisc show`.
 // The list can be filtered by link.

@@ -450,6 +450,95 @@ func (h *Handle) filterModify(filter Filter, proto, flags int) error {
 	return err
 }
 
+func FilterDeserialize(hdr *unix.NlMsghdr, m []byte) (Filter, error) {
+	msg := nl.DeserializeTcMsg(m)
+
+	attrs, err := nl.ParseRouteAttr(m[msg.Len():])
+	if err != nil {
+		return nil, err
+	}
+
+	base := FilterAttrs{
+		LinkIndex: int(msg.Ifindex),
+		Handle:    msg.Handle,
+		Parent:    msg.Parent,
+	}
+	base.Priority, base.Protocol = MajorMinor(msg.Info)
+	base.Protocol = nl.Swap16(base.Protocol)
+
+	var (
+		filter     Filter
+		filterType string
+	)
+
+	for _, attr := range attrs {
+		attrType := attr.Attr.Type & nl.NLA_TYPE_MASK
+		switch attrType {
+		case nl.TCA_KIND:
+			filterType = string(attr.Value[:len(attr.Value)-1])
+			switch filterType {
+			case "u32":
+				filter = &U32{}
+			case "fw":
+				filter = &FwFilter{}
+			case "bpf":
+				filter = &BpfFilter{}
+			case "matchall":
+				filter = &MatchAll{}
+			case "flower":
+				filter = &Flower{}
+			default:
+				filter = &GenericFilter{FilterType: filterType}
+			}
+
+		case nl.TCA_OPTIONS:
+			// Parse per-kind options. We rely on TCA_KIND appearing first,
+			// as in FilterList.
+			data, err := nl.ParseRouteAttr(attr.Value)
+			if err != nil {
+				return nil, err
+			}
+			switch filterType {
+			case "u32":
+				if _, err := parseU32Data(filter, data); err != nil {
+					return nil, err
+				}
+			case "fw":
+				if _, err := parseFwData(filter, data); err != nil {
+					return nil, err
+				}
+			case "bpf":
+				if _, err := parseBpfData(filter, data); err != nil {
+					return nil, err
+				}
+			case "matchall":
+				if _, err := parseMatchAllData(filter, data); err != nil {
+					return nil, err
+				}
+			case "flower":
+				if _, err := parseFlowerData(filter, data); err != nil {
+					return nil, err
+				}
+			default:
+				// generic filter – nothing to decode
+			}
+
+		case nl.TCA_CHAIN:
+			val := new(uint32)
+			*val = native.Uint32(attr.Value)
+			base.Chain = val
+		}
+	}
+
+	// If kind never arrived, fall back to a generic filter.
+	if filter == nil {
+		filter = &GenericFilter{FilterType: filterType}
+	}
+
+	*filter.Attrs() = base
+	return filter, nil
+}
+
 // FilterList gets a list of filters in the system.
 // Equivalent to: `tc filter show`.
 //
