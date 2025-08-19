@@ -199,6 +199,88 @@ func classPayload(req *nl.NetlinkRequest, class Class) error {
 	return nil
 }
 
+// ClassDeserialize deserializes a raw message received from netlink into
+// a class object.
+func ClassDeserialize(hdr *unix.NlMsghdr, m []byte) (Class, error) {
+	msg := nl.DeserializeTcMsg(m)
+
+	attrs, err := nl.ParseRouteAttr(m[msg.Len():])
+	if err != nil {
+		return nil, err
+	}
+
+	base := ClassAttrs{
+		LinkIndex:  int(msg.Ifindex),
+		Handle:     msg.Handle,
+		Parent:     msg.Parent,
+		Statistics: nil,
+	}
+
+	var (
+		class     Class
+		classType string
+	)
+
+	for _, attr := range attrs {
+		switch attr.Attr.Type {
+		case nl.TCA_KIND:
+			classType = string(attr.Value[:len(attr.Value)-1])
+			switch classType {
+			case "htb":
+				class = &HtbClass{}
+			case "hfsc":
+				class = &HfscClass{}
+			default:
+				class = &GenericClass{ClassType: classType}
+			}
+
+		case nl.TCA_OPTIONS:
+			// Per-kind options. We rely on TCA_KIND appearing first, matching ClassList.
+			switch classType {
+			case "htb":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if _, err := parseHtbClassData(class, data); err != nil {
+					return nil, err
+				}
+			case "hfsc":
+				data, err := nl.ParseRouteAttr(attr.Value)
+				if err != nil {
+					return nil, err
+				}
+				if _, err := parseHfscClassData(class, data); err != nil {
+					return nil, err
+				}
+			}
+
+		// For backward compatibility.
+		case nl.TCA_STATS:
+			stats, err := parseTcStats(attr.Value)
+			if err != nil {
+				return nil, err
+			}
+			base.Statistics = stats
+
+		case nl.TCA_STATS2:
+			stats, err := parseTcStats2(attr.Value)
+			if err != nil {
+				return nil, err
+			}
+			base.Statistics = stats
+		}
+	}
+
+	// If kind never arrived, fall back to a generic class to avoid nil deref.
+	if class == nil {
+		class = &GenericClass{ClassType: classType}
+	}
+
+	*class.Attrs() = base
+	return class, nil
+}
+
 // ClassList gets a list of classes in the system.
 // Equivalent to: `tc class show`.
 //
