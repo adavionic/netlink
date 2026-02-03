@@ -256,14 +256,28 @@ func (filter *Flower) decode(data []syscall.NetlinkRouteAttr) error {
 				return err
 			}
 		case nl.TCA_FLOWER_FLAGS:
-			attr := nl.DeserializeUint32Bitfield(datum.Value)
-			skipSw := attr.Value & nl.TCA_CLS_FLAGS_SKIP_HW
-			skipHw := attr.Value & nl.TCA_CLS_FLAGS_SKIP_SW
-			if skipSw != 0 {
-				filter.SkipSw = true
-			}
-			if skipHw != 0 {
-				filter.SkipHw = true
+			if len(datum.Value) == 4 {
+				// Older kernels send a raw uint32 (flags only, no mask)
+				flags := native.Uint32(datum.Value)
+				// We assume these flags are "set", so we check them directly.
+				// (Old kernels didn't support skip_sw/skip_hw reliability)
+				if flags&nl.TCA_CLS_FLAGS_SKIP_HW != 0 {
+					filter.SkipHw = true
+				}
+				if flags&nl.TCA_CLS_FLAGS_SKIP_SW != 0 {
+					filter.SkipSw = true
+				}
+			} else if len(datum.Value) >= 8 {
+				// Newer kernels send a Bitfield (Value + Mask)
+				attr := nl.DeserializeUint32Bitfield(datum.Value)
+				skipSw := attr.Value & nl.TCA_CLS_FLAGS_SKIP_HW
+				skipHw := attr.Value & nl.TCA_CLS_FLAGS_SKIP_SW
+				if skipSw != 0 {
+					filter.SkipSw = true
+				}
+				if skipHw != 0 {
+					filter.SkipHw = true
+				}
 			}
 		case nl.TCA_FLOWER_KEY_PORT_SRC_MIN:
 			filter.SrcPortRangeMin = ntohs(datum.Value)
